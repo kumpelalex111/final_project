@@ -55,7 +55,7 @@ kubectl get pods --all-namespaces
 
 ## Создание тестового приложения
 
-В качестве приложения будет использоваться статическая стратица index.html. Соберем docker-образ с помощью [dockerfile](dockerfile) и поместим этот образ в созданный YC Registry:
+В качестве приложения будет использоваться статическая стратица index.html. Соберем docker-образ с помощью [dockerfile](./dockerfile/Dockerfile) и поместим этот образ в созданный YC Registry:
 ```
 docker tag nginx_alex:1.30.4 cr.yandex/crpfsj6kk1tn7isut41s/nginx_alex:1.30.4
 docker push cr.yandex/crpfsj6kk1tn7isut41s/nginx_alex:1.30.4
