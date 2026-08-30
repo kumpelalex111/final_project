@@ -1,0 +1,114 @@
+---
+- name: Prepare all nodes for Kubernetes
+  hosts: master, workers
+  become: true
+  vars:
+    k8s_version: "1.36"
+  tasks:
+    - name: Disable SWAP (temporary)
+      command: swapoff -a
+      changed_when: false
+
+    - name: Disable SWAP in fstab (permanent)
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*?\sswap\s+.*)$'
+        replace: '# \1'
+   
+    - name: Загрузить модули ядра Linux (overlay и br_netfilter)
+      ansible.builtin.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Настроить автозагрузку модулей ядра при старте ОС
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Настроить параметры sysctl для сетевого моста
+      ansible.builtin.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: yes
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: Обновить кеш и установить пакеты
+      ansible.builtin.apt:
+        update_cache: yes
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - containerd
+          - gpg
+          - mc
+          - python3-kubernetes
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Создать директорию для конфигурации containerd
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Сгенерировать дефолтный конфиг для containerd 
+      ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+      notify: restart containerd
+
+    - name: Убедиться, что каталог keyrings существует
+      ansible.builtin.get_url.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Загрузить K8S GPG key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key"
+        dest: /tmp/k8s-release.key
+
+    - name: De-armor Kubernetes GPG key
+      ansible.builtin.shell: gpg --dearmor < /tmp/k8s-release.key > /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Добавить репозиторий apt K8S
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /"
+        filename: kubernetes
+        state: present
+
+    - name: Установка компонентов K8S
+      ansible.builtin.apt:
+        update_cache: yes
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Не обновлять пакеты K8S
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+
+  handlers:
+    - name: restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+

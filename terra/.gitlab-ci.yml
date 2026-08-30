@@ -1,0 +1,77 @@
+image:
+  name: hashicorp/terraform:1.15.5
+  entrypoint: [""]
+
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_IN_AUTOMATION: "true"
+
+stages:
+  - init
+  - plan
+  - apply
+
+# Выносим общую настройку зеркала и проверку переменных в скрытый шаблон,
+# чтобы не дублировать код и не крутить curl на шаге apply.
+.terraform_base:
+  before_script:
+    - cd ${TF_ROOT}
+    - mkdir -p /tmp
+    - echo 'provider_installation { network_mirror { url = "https://terraform-mirror.yandexcloud.net/" } }' > /tmp/terraformrc
+    - export TF_CLI_CONFIG_FILE=/tmp/terraformrc
+    # Проверка обязательных переменных
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "❌ AWS credentials are not set!"; exit 1;
+      fi
+    - |
+      if [ ! -f "$YC_SERVICE_ACCOUNT_KEY_FILE" ]; then
+        echo "❌ YC_SERVICE_ACCOUNT_KEY_FILE not found at: $YC_SERVICE_ACCOUNT_KEY_FILE"; exit 1;
+      fi
+
+terraform_init:
+  extends: .terraform_base
+  stage: init
+  tags:
+    - terra
+  script:
+    # Для отладки сети запускаем curl ТОЛЬКО при инициализации
+    - apk add --no-cache curl && curl -I https://terraform-mirror.yandexcloud.net
+    - terraform init -backend-config="access_key=$AWS_ACCESS_KEY_ID" -backend-config="secret_key=$AWS_SECRET_ACCESS_KEY"
+  artifacts:
+    name: "terraform-init-data"
+    paths:
+      - ${TF_ROOT}/.terraform/
+      - ${TF_ROOT}/.terraform.lock.hcl
+    expire_in: 1 hour
+
+terraform_plan:
+  extends: .terraform_base
+  stage: plan
+  tags:
+    - terra
+  dependencies:
+    - terraform_init # ЯВНО указываем скачивать файлы инициализации
+  script:
+    - terraform plan -out=plan.tfplan
+  artifacts:
+    name: "terraform-plan-file"
+    paths:
+      - ${TF_ROOT}/plan.tfplan
+    expire_in: 7 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+terraform_apply:
+  extends: .terraform_base
+  stage: apply
+  tags:
+    - terra
+  dependencies:
+    - terraform_init # Нужна папка .terraform
+    - terraform_plan # Нужен файл plan.tfplan
+  script:
+    - terraform apply -auto-approve -input=false plan.tfplan
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual

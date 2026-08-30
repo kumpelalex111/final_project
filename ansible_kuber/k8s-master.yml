@@ -1,0 +1,77 @@
+---
+- name: Инициализация Kubernetes Master
+  hosts: master
+  become: true
+  vars:
+    pod_cidr: "10.200.0.0/16"
+    kubeconfig_path: "/home/{{ ansible_user }}/.kube/config"
+  tasks:
+    - name: Проверка, инициализирован ли уже кластер
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_admin_conf
+
+    - name: Инициализация kubeadm init
+      ansible.builtin.command: >
+          kubeadm init 
+          --apiserver-advertise-address={{ ansible_default_ipv4.address }} 
+          --pod-network-cidr={{ pod_cidr }}
+      register: kubeadm_init_output
+      when: not kubeadm_admin_conf.stat.exists
+      changed_when: true
+
+    # Небольшая пауза и проверка доступности API (чтобы не применять CNI на «полуживом» кластере)
+    - name: Ожидание доступности Kubernetes API
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 6443
+        state: started
+        delay: 5
+        timeout: 120
+      when: kubeadm_init_output is changed
+
+    - name: Генерация команды для подключения worker-нод
+      ansible.builtin.command: "kubeadm token create --print-join-command --ttl 24h"
+      register: join_command_output
+      changed_when: false
+
+    - name: Сохранение команды join в глобальные переменные (facts)
+      ansible.builtin.set_fact:
+        k8s_join_command: "{{ join_command_output.stdout }}"
+
+    - name: Настройка прав | Создание директории .kube для пользователя {{ ansible_user }}
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Настройка прав | Копирование admin.conf в профиль пользователя
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ kubeconfig_path }}"
+        remote_src: true
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    # Скачиваем манифест Flannel
+    - name: Flannel | Загрузка манифеста во временную директорию
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
+        dest: "/tmp/kube-flannel.yml"
+        mode: '0644'
+
+    - name: Flannel  Подстановка кастомного Pod CIDR в манифест
+      ansible.builtin.replace:
+        path: "/tmp/kube-flannel.yml"
+        regexp: '10.244.0.0/16'
+        replace: "{{ pod_cidr }}"
+
+    # Применяем манифест Flannel (без правки CIDR внутри него)
+    - name: Flannel | Применение манифеста Flannel
+      kubernetes.core.k8s:
+        src: "/tmp/kube-flannel.yml"
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"

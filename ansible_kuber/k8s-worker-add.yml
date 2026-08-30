@@ -1,0 +1,26 @@
+---
+- name: Сбор фактов с Мастера
+  hosts: master
+  gather_facts: true 
+
+- name: Join Worker Nodes to Cluster
+  hosts: workers
+  become: true
+  tasks:
+    - name: Проверка, подключена ли уже нода к кластеру
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Подключение к кластеру Kubernetes
+      ansible.builtin.command: "{{ hostvars[groups['master'][0]]['k8s_join_command'] }}"
+      register: worker_join_output
+      when: not kubelet_conf.stat.exists
+      # Защита от скрытия секретных токенов в логах Ansible
+      no_log: true 
+
+    - name: Логирование результата подключения
+      ansible.builtin.debug:
+        msg: "Нода успешно подключена к кластеру."
+      when: not kubelet_conf.stat.exists and worker_join_output.rc == 0
+

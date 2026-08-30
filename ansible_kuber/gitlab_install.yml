@@ -1,0 +1,91 @@
+---
+- name: Установка GitLab 19.2 на Ubuntu 24.04
+  hosts: gitlab
+  become: yes
+  vars:
+    gitlab_edition: "gitlab-ce"          # gitlab-ee для Enterprise Edition
+    gitlab_version: "19.2.0-ce.0"        
+    external_url: "http://192.168.50.17" 
+    local_dest_dir: "./credentials"
+
+
+  tasks:
+    - name: Установка зависимостей для GitLab 19.x
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - wget
+          - gnupg
+          - software-properties-common
+          - openssh-server
+          - postfix
+          - tzdata
+          - perl
+          - net-tools
+          - vim
+          - policycoreutils
+          - python3-psycopg2
+          - libpq-dev 
+          - git  
+          - rsync  # Для репликации
+        state: present
+        update_cache: yes
+
+    - name: Уде установлен GitLab (проверим)
+      ansible.builtin.stat:
+        path: /etc/gitlab/gitlab.rb
+      register: gitlab_installed
+
+    - name: Загрузка скрипта репоритория GitLab
+      get_url:
+        url: "https://packages.gitlab.com/install/repositories/gitlab/{{ gitlab_edition }}/script.deb.sh"
+        dest: "/tmp/gitlab_repo_script.sh"
+        mode: '0755'
+      when: not gitlab_installed.stat.exists
+
+    - name: Добавление пакета репозитория GitLab
+      command: bash /tmp/gitlab_repo_script.sh
+      args:
+        creates: "/etc/apt/sources.list.d/gitlab_{{ gitlab_edition }}.list"
+      when: not gitlab_installed.stat.exists
+
+    - name: Установка переменной окружения  EXTERNAL_URL 
+      lineinfile:
+        path: /etc/environment
+        line: "EXTERNAL_URL={{ external_url }}"
+        create: yes
+
+    - name: Установка нужной версии GitLab (19.2)
+      apt:
+        name: "{{ gitlab_edition }}={{ gitlab_version }}"
+        state: present
+        update_cache: yes
+      environment:
+        EXTERNAL_URL: "{{ external_url }}"
+        DEBIAN_FRONTEND: "noninteractive"
+      when: not gitlab_installed.stat.exists
+
+    - name: Запуск переконфигурации GitLab 
+      command: gitlab-ctl reconfigure
+      args:
+        creates: "/var/opt/gitlab/bootstrapped"
+
+    - name: Проверка существования файла initial_root_password 
+      ansible.builtin.stat:
+        path: /etc/gitlab/initial_root_password
+      register: password_file
+
+    - name: Копирование файла первоначального пароля (initial_root_password) 
+      ansible.builtin.fetch:
+        src: /etc/gitlab/initial_root_password
+        dest: "{{ local_dest_dir }}/"
+        flat: yes
+      when: password_file.stat.exists
+
+    - name: Файл с паролем не найден
+      ansible.builtin.debug:
+        msg: "Файл /etc/gitlab/initial_root_password не найден на сервере (прошло более 24 часов с момента установки или файл уже был удален)."
+      when: not password_file.stat.exists
+
